@@ -9,11 +9,27 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
+// Configurar axios para simular um navegador real
+const axiosInstance = axios.create({
+    headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+    },
+    timeout: 30000
+});
+
 // Função para extrair dados da série
 async function extractSeriesData(url) {
     try {
         console.log(`🔍 Acessando URL: ${url}`);
-        const response = await axios.get(url);
+        
+        const response = await axiosInstance.get(url);
+        console.log(`📄 Status: ${response.status}, Tamanho: ${response.data.length}`);
+        
         const $ = cheerio.load(response.data);
         
         const seriesData = {
@@ -21,128 +37,112 @@ async function extractSeriesData(url) {
             seasons: []
         };
 
-        // DEBUG: Ver todo o HTML
-        console.log('📄 HTML carregado, tamanho:', response.data.length);
-
-        // Extrair título da série - múltiplas estratégias
-        let title = '';
-
-        // Estratégia 1: Do nome do arquivo da imagem
-        const imageSrc = $('img').first().attr('src');
-        console.log('🖼️ Imagem encontrada:', imageSrc);
+        // Extrair título da página
+        const pageTitle = $('title').text();
+        console.log('📝 Título da página:', pageTitle);
         
-        if (imageSrc) {
-            const titleMatch = imageSrc.match(/\/([^\/]+)%20Capa\.jpg/);
-            if (titleMatch) {
-                title = decodeURIComponent(titleMatch[1]).replace(/%20/g, ' ');
-                console.log('📝 Título da imagem:', title);
-            }
-        }
+        // Limpar o título
+        seriesData.title = pageTitle.replace('(Dublado)', '').replace('(Legendado)', '').trim();
 
-        // Estratégia 2: Do título da página
-        if (!title) {
-            const pageTitle = $('title').text();
-            console.log('📄 Título da página:', pageTitle);
-            // Extrair nome da série do título
-            const titleMatch = pageTitle.match(/(.+?)\s*-\s*Rede Canais/);
-            if (titleMatch) {
-                title = titleMatch[1].trim();
-                console.log('📝 Título extraído:', title);
-            }
-        }
+        // Estratégia 1: Procurar por elementos específicos que contenham os dados
+        console.log('🔍 Procurando por conteúdo...');
 
-        seriesData.title = title;
-
-        // Buscar o container principal - vamos tentar diferentes seletores
-        let contentContainer = null;
-
-        // Tentar diferentes seletores possíveis
-        const possibleSelectors = [
-            'p[style*="outline"]',
+        // Buscar todas as tags que podem conter os episódios
+        const contentSelectors = [
             'p',
+            'div',
+            'section',
+            'article',
             '.content',
             '#content',
-            'div p',
-            'body > p'
+            '.episodes',
+            '.season'
         ];
 
-        for (const selector of possibleSelectors) {
-            const element = $(selector).first();
-            if (element.length > 0) {
-                console.log(`✅ Container encontrado com seletor: ${selector}`);
-                contentContainer = element;
-                break;
-            }
+        let foundContent = null;
+
+        for (const selector of contentSelectors) {
+            const elements = $(selector);
+            console.log(`🔍 Seletor "${selector}": ${elements.length} elementos`);
+            
+            elements.each((index, element) => {
+                const $element = $(element);
+                const text = $element.text();
+                
+                // Verificar se contém informações de episódios
+                if (text.includes('Episódio') && text.includes('Temporada')) {
+                    console.log(`✅ Possível container encontrado com: ${selector}`);
+                    console.log(`📋 Amostra: ${text.substring(0, 100)}...`);
+                    foundContent = $element;
+                    return false; // break
+                }
+            });
+            
+            if (foundContent) break;
         }
 
-        if (!contentContainer) {
-            console.log('❌ Nenhum container encontrado');
-            // Tentar pegar todo o body
-            contentContainer = $('body');
+        // Se não encontrou, usar o body
+        if (!foundContent) {
+            console.log('ℹ️ Usando body como fallback');
+            foundContent = $('body');
         }
 
-        console.log('📦 Conteúdo do container:', contentContainer.html().substring(0, 200) + '...');
+        // Extrair todo o texto para análise
+        const fullText = foundContent.text();
+        console.log('📋 Texto completo (primeiros 500 chars):', fullText.substring(0, 500));
 
+        // Processar o conteúdo
+        const lines = fullText.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+        
         let currentSeason = null;
         const seasons = [];
 
-        // Processar todos os elementos filhos do container
-        contentContainer.contents().each((index, element) => {
-            const $element = $(element);
-            const text = $element.text().trim();
-
-            // Pular elementos vazios
-            if (!text) return;
-
-            console.log(`🔍 Elemento ${index}:`, text.substring(0, 50) + '...');
-
-            // Verificar se é um título de temporada
-            if (text.match(/\d+ª\s*Temporada/) || text.includes('Temporada')) {
-                console.log(`🎬 ENCONTRADA TEMPORADA: ${text}`);
+        lines.forEach((line, index) => {
+            // Verificar se é uma temporada
+            if (line.match(/\d+ª\s*Temporada/i) || line.includes('Temporada')) {
+                console.log(`🎬 Temporada encontrada: ${line}`);
                 
-                if (currentSeason) {
+                if (currentSeason && currentSeason.episodes.length > 0) {
                     seasons.push(currentSeason);
                 }
                 
                 currentSeason = {
-                    season: text,
+                    season: line,
                     episodes: []
                 };
                 return;
             }
 
             // Verificar se é um episódio
-            if (text.includes('Episódio') && currentSeason) {
-                console.log(`📺 ENCONTRADO EPISÓDIO: ${text}`);
-                const episodeData = extractEpisodeData($element);
+            if (line.includes('Episódio') && currentSeason) {
+                console.log(`📺 Episódio encontrado: ${line}`);
+                
+                const episodeData = extractEpisodeFromText(line, foundContent);
                 if (episodeData) {
                     currentSeason.episodes.push(episodeData);
-                    console.log(`✅ Episódio adicionado: ${episodeData.episode}`);
                 }
             }
         });
 
-        // Adicionar a última temporada se existir
+        // Adicionar a última temporada
         if (currentSeason && currentSeason.episodes.length > 0) {
             seasons.push(currentSeason);
         }
 
         seriesData.seasons = seasons;
 
-        console.log(`📊 Resumo: ${seasons.length} temporadas encontradas`);
-        seasons.forEach((season, index) => {
-            console.log(`  Temporada ${index + 1}: ${season.episodes.length} episódios`);
-        });
+        console.log(`📊 Resumo: ${seasons.length} temporadas, ${seasons.reduce((acc, s) => acc + s.episodes.length, 0)} episódios`);
 
         return seriesData;
+
     } catch (error) {
         console.error('❌ Erro ao extrair dados:', error.message);
-        throw new Error(`Erro ao extrair dados da série: ${error.message}`);
+        throw new Error(`Erro ao extrair dados: ${error.message}`);
     }
 }
 
-// Função para extrair dados de um episódio
-function extractEpisodeData($element) {
+// Função para extrair episódio do texto
+function extractEpisodeFromText(line, $container) {
     try {
         const episodeData = {
             episode: '',
@@ -150,62 +150,39 @@ function extractEpisodeData($element) {
             links: {}
         };
 
-        const episodeText = $element.text().trim();
-        console.log('📋 Texto do episódio:', episodeText);
-
         // Extrair número do episódio
-        const episodeMatch = episodeText.match(/Episódio\s+(\d+)/i);
+        const episodeMatch = line.match(/Episódio\s+(\d+)/i);
         if (episodeMatch) {
             episodeData.episode = `Episódio ${episodeMatch[1]}`;
-        } else {
-            // Tentar padrão alternativo
-            const altMatch = episodeText.match(/Ep\.?\s*(\d+)/i);
-            if (altMatch) {
-                episodeData.episode = `Episódio ${altMatch[1]}`;
-            }
         }
 
-        // Extrair título do episódio (se existir)
-        const titleMatch = episodeText.match(/Episódio\s+\d+\s*-\s*(.+?)(?:\s*(?:Dublado|Legendado|Assistir)|$)/i);
+        // Extrair título (se existir)
+        const titleMatch = line.match(/Episódio\s+\d+\s*-\s*(.+?)(?:\s*$)/i);
         if (titleMatch && titleMatch[1].trim() && titleMatch[1].trim() !== '-') {
             episodeData.title = titleMatch[1].trim();
         }
 
-        // Extrair links
-        $element.find('a').each((i, link) => {
+        // Buscar links no container - estratégia mais agressiva
+        $container.find('a').each((i, link) => {
             const $link = $(link);
             const href = $link.attr('href');
             const text = $link.text().trim();
-            
-            if (href) {
+            const parentText = $link.parent().text();
+
+            // Verificar se este link está relacionado ao episódio atual
+            if (href && parentText.includes(line.substring(0, 20))) {
                 const fullUrl = `https://redecanais.sh${href}`;
                 
                 if (text === 'Assistir' || text === 'Dublado' || text === 'Legendado') {
                     episodeData.links[text.toLowerCase()] = fullUrl;
-                    console.log(`🔗 Link ${text}: ${fullUrl}`);
-                } else if (!episodeData.links.assistir) {
-                    // Se não tem texto específico, assume como "assistir"
+                } else if (text && !episodeData.links.assistir) {
                     episodeData.links.assistir = fullUrl;
                 }
             }
         });
 
-        // Se não encontrou links, tentar extrair do elemento pai
-        if (Object.keys(episodeData.links).length === 0) {
-            $element.parent().find('a').each((i, link) => {
-                const $link = $(link);
-                const href = $link.attr('href');
-                const text = $link.text().trim();
-                
-                if (href) {
-                    const fullUrl = `https://redecanais.sh${href}`;
-                    episodeData.links[text.toLowerCase()] = fullUrl;
-                    console.log(`🔗 Link alternativo ${text}: ${fullUrl}`);
-                }
-            });
-        }
-
         return Object.keys(episodeData.links).length > 0 ? episodeData : null;
+
     } catch (error) {
         console.error('❌ Erro ao extrair episódio:', error);
         return null;
@@ -225,7 +202,6 @@ app.get('/api/series', async (req, res) => {
     }
 
     try {
-        // Validar se a URL é do Rede Canais
         if (!url.includes('redecanais.sh')) {
             return res.status(400).json({
                 error: 'URL deve ser do domínio redecanais.sh'
@@ -258,7 +234,7 @@ app.get('/api/series', async (req, res) => {
     }
 });
 
-// Endpoint de debug - retorna HTML bruto para análise
+// Endpoint de debug melhorado
 app.get('/api/debug', async (req, res) => {
     const { url } = req.query;
 
@@ -267,31 +243,49 @@ app.get('/api/debug', async (req, res) => {
     }
 
     try {
-        const response = await axios.get(url);
+        const response = await axiosInstance.get(url);
         const $ = cheerio.load(response.data);
-        
-        // Encontrar todos os elementos possíveis
-        const elements = [];
-        $('p, div, span').each((index, element) => {
+
+        // Coletar informações úteis
+        const info = {
+            url: url,
+            status: response.status,
+            title: $('title').text(),
+            metaDescription: $('meta[name="description"]').attr('content'),
+            bodyLength: $('body').text().length,
+            allLinks: $('a').length,
+            possibleContentElements: []
+        };
+
+        // Encontrar elementos que podem conter o conteúdo
+        $('p, div, section, article').each((index, element) => {
             const $element = $(element);
             const text = $element.text().trim();
+            
             if (text && (text.includes('Episódio') || text.includes('Temporada'))) {
-                elements.push({
+                info.possibleContentElements.push({
                     tag: element.tagName,
-                    text: text.substring(0, 100),
-                    html: $element.html().substring(0, 200)
+                    class: $element.attr('class'),
+                    id: $element.attr('id'),
+                    text: text.substring(0, 150),
+                    links: $element.find('a').length
                 });
             }
         });
 
-        res.json({
-            url: url,
-            title: $('title').text(),
-            elements: elements,
-            htmlSample: response.data.substring(0, 1000)
-        });
+        // Amostra do HTML
+        info.htmlSample = response.data.substring(0, 2000);
+
+        res.json(info);
+
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ 
+            error: error.message,
+            response: error.response ? {
+                status: error.response.status,
+                headers: error.response.headers
+            } : null
+        });
     }
 });
 
@@ -300,22 +294,19 @@ app.get('/health', (req, res) => {
     res.json({ 
         status: 'API funcionando', 
         timestamp: new Date().toISOString(),
-        version: '1.0.0'
+        version: '1.1.0'
     });
 });
 
-// Rota raiz
 app.get('/', (req, res) => {
     res.json({
-        message: 'API de Extração de Séries - Rede Canais',
+        message: 'API de Extração de Séries - Rede Canais v1.1',
         endpoints: {
-            '/api/series': 'Extrair dados da série. Parâmetro: url',
-            '/api/debug': 'Debug - retorna HTML bruto',
-            '/health': 'Verificar status da API'
+            '/api/series': 'Extrair dados da série',
+            '/api/debug': 'Debug detalhado',
+            '/health': 'Status da API'
         },
-        exemplo: {
-            url: '/api/series?url=https://redecanais.sh/browse-alice-in-borderland-videos-1-date.html'
-        }
+        exemplo: 'https://effective-pancake-wgc5.onrender.com/api/series?url=https://redecanais.sh/browse-alice-in-borderland-videos-1-date.html'
     });
 });
 
